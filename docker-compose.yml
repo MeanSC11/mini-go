@@ -1,0 +1,55 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gobot
+      POSTGRES_PASSWORD: gobot
+      POSTGRES_DB: gobot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gobot"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    environment:
+      GOBOT_DATABASE_URL: postgresql+asyncpg://gobot:gobot@db:5432/gobot
+      GOBOT_INFERENCE_URL: http://inference:8001
+      GOBOT_CORS_ORIGINS: '["http://localhost:3000"]'
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  inference:
+    build:
+      context: .
+      dockerfile: inference/Dockerfile
+    environment:
+      GOBOT_INF_CHECKPOINT_DIR: /checkpoints
+      GOBOT_INF_DEVICE: cpu
+    volumes:
+      - ./training/checkpoints:/checkpoints
+    ports:
+      - "8001:8001"
+
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - server
+
+volumes:
+  pgdata:

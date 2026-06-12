@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# Training artifacts
+runs/
+checkpoints/
+checkpoints-smoke/
+training/runs/
+training/checkpoints/
+training/checkpoints-smoke/
+*.npz
+*.pt
+*.ckpt
+events.out.tfevents.*
+
+# Misc
+.env
+*.db
+.DS_Store

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "go-training"
+version = "0.1.0"
+description = "AlphaZero-style training for go-bot: network, PUCT MCTS, self-play, evaluation."
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+    "tensorboard>=2.16",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+azero-train = "azero.train:main"
+azero-selfplay = "azero.selfplay:main"
+azero-evaluate = "azero.evaluate:main"
+
+[tool.setuptools.packages.find]
+include = ["azero*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
