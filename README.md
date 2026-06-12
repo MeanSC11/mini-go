@@ -85,6 +85,61 @@ cd training  && python -m pytest      # features, network, PUCT, self-play, chec
 
 ## Training
 
+The loop is the classic AlphaZero cycle: the **best** model plays games against
+itself, those games train a **candidate**, and the candidate only replaces best
+if it actually wins their match. Repeat — each pass the model gets a little
+stronger and feeds itself harder games.
+
+```
+                         ┌──────────────────────────────────────────┐
+                         │          ONE ITERATION (repeat ×N)         │
+                         └──────────────────────────────────────────┘
+
+   best.pt ──────┐
+   (current      │   ┌─────────────────────┐   (state, policy π, outcome z) samples
+    champion)    └──▶│  1. SELF-PLAY        │──────────────┐
+                     │  games_per_iteration │              │
+                     │  games, `workers`    │              ▼
+                     │  parallel procs.     │     ┌────────────────────┐
+                     │  PUCT MCTS +         │     │  2. REPLAY BUFFER   │
+                     │  Dirichlet noise     │     │  buffer_size ring   │
+                     └─────────────────────┘     │  persisted to disk  │
+                                                 │  (runs/replay.npz)  │
+                                                 └─────────┬──────────┘
+                                                           │ sample
+                          buffer < min_buffer_size?        │ batches
+                          → skip training, play more       ▼
+                                                 ┌────────────────────┐
+                                                 │  3. TRAIN CANDIDATE │
+                                                 │  train_steps SGD    │
+                                                 │  loss = policy(CE)  │
+                                                 │       + value(MSE)  │
+                                                 └─────────┬──────────┘
+                                                           │ candidate.pt
+                                                           ▼
+                                                 ┌────────────────────┐
+                                  ┌──────────────│  4. EVALUATE        │
+                                  │              │  candidate vs best  │
+                                  │              │  eval_games match   │
+                                  │              └─────────┬──────────┘
+                       win_rate <  │                        │ win_rate ≥
+                       promotion   │                        │ promotion_win_rate
+                       _win_rate   │                        ▼
+                                  │              ┌────────────────────┐
+                          keep    │              │  5. PROMOTE         │
+                          best,   │              │  candidate → best   │
+                          candidate│             └─────────┬──────────┘
+                          trains   │                        │
+                          on       ▼                        ▼
+                  ┌─────────────────────────────────────────────────┐
+                  │  Always write checkpoints/iterNNN.pt             │
+                  │  → appears as bot level `az-iterNNN` in the      │
+                  │    inference service / lobby                     │
+                  └─────────────────────────────────────────────────┘
+                                  │
+                                  └────────▶ next iteration uses the new best.pt
+```
+
 All hyperparameters live in [training/config.yaml](training/config.yaml)
 (board size, blocks/filters, simulations, buffer, learning rate, promotion
 threshold, etc.)
