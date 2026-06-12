@@ -1,30 +1,31 @@
 # go-bot
 
-เกมหมากล้อม (Go/Baduk) พร้อม AI bot ที่เทรนด้วย self-play แบบ AlphaZero และ Web UI สำหรับเล่นจริง
+A Go (Baduk) game with an AI bot trained via AlphaZero-style self-play, plus a Web UI for real play.
 
 ## Architecture
 
 ```
 go-bot/
-├── engine/        # กติกาหมากล้อม (pure Python) — single source of truth ของกติกา
+├── engine/        # Go rules (pure Python) — single source of truth for the rules
 ├── training/      # AlphaZero: ResNet + PUCT MCTS + self-play loop (PyTorch)
 ├── server/        # FastAPI game server: REST + WebSocket + PostgreSQL
 ├── inference/     # bot inference service (random / pure-MCTS / AlphaZero checkpoints)
 └── web/           # Next.js frontend (SVG board)
 ```
 
-- **engine** (`goengine`): กระดาน 9x9/13x13/19x19, จับกิน, ห้าม suicide,
-  positional superko, นับคะแนนแบบ Chinese (komi 7.5), pass 2 ครั้งจบเกม,
-  export/import SGF — ใช้ร่วมกันทุก service; frontend แค่ render และส่ง intent
-  ทุกตาเดินถูก validate ที่ server ด้วย engine
-- **server**: สร้าง/join เกมผ่าน REST, เดินหมากผ่าน WebSocket แบบ real-time,
-  เก็บทุกเกม (พร้อม SGF) ลง PostgreSQL, ELO rating, ขอ analysis
-  (win rate + policy heatmap) จาก inference service
-- **inference**: HTTP service แยก process ถือ model — ระดับความเก่ง:
-  `random` → `mcts-100/300/800` (pure UCT) → `az-iterNNN` (checkpoint จากการเทรน
-  ยิ่ง iteration สูงยิ่งเก่ง)
-- **training**: self-play → replay buffer → train → evaluate กับ model เก่า →
-  promote เมื่อชนะ ≥ 55% — log ด้วย TensorBoard, checkpoint ทุก iteration
+- **engine** (`goengine`): 9x9/13x13/19x19 boards, captures, suicide forbidden,
+  positional superko, Chinese scoring (komi 7.5), two consecutive passes end the
+  game, SGF export/import — shared by every service; the frontend only renders
+  and sends intents. Every move is validated on the server using the engine.
+- **server**: create/join games via REST, play moves over WebSocket in real
+  time, persist every game (with SGF) to PostgreSQL, ELO rating, request
+  analysis (win rate + policy heatmap) from the inference service
+- **inference**: separate HTTP service process holding the models — strength
+  levels: `random` → `mcts-100/300/800` (pure UCT) → `az-iterNNN` (training
+  checkpoints; higher iterations are stronger)
+- **training**: self-play → replay buffer → train → evaluate against the
+  previous model → promote on ≥ 55% win rate — TensorBoard logging, checkpoint
+  every iteration
 
 ## Quick start (Docker)
 
@@ -34,17 +35,17 @@ docker compose up --build
 ```
 
 - Web UI: http://localhost:3000
-- Game server API: http://localhost:8000 (OpenAPI docs ที่ `/docs`)
+- Game server API: http://localhost:8000 (OpenAPI docs at `/docs`)
 - Inference service: http://localhost:8001
 - PostgreSQL: localhost:5432 (`gobot`/`gobot`)
 
-Checkpoints ที่เทรนแล้วใน `training/checkpoints/` จะถูก mount เข้า inference
-service อัตโนมัติ และโผล่เป็นระดับ bot ในหน้า lobby
+Trained checkpoints in `training/checkpoints/` are mounted into the inference
+service automatically and show up as bot levels in the lobby.
 
-## Dev environment (ไม่ใช้ Docker)
+## Dev environment (without Docker)
 
-ต้องมี Python ≥ 3.10, Node ≥ 20 และ PostgreSQL (หรือปล่อยให้ server ใช้
-SQLite ชั่วคราวผ่าน `GOBOT_DATABASE_URL=sqlite+aiosqlite:///./dev.db`)
+Requires Python ≥ 3.10, Node ≥ 20, and PostgreSQL (or let the server use a
+temporary SQLite database via `GOBOT_DATABASE_URL=sqlite+aiosqlite:///./dev.db`)
 
 ```bash
 cd go-bot
@@ -57,10 +58,10 @@ pip install -e inference[dev]
 pip install -e training[dev] --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
-รันแต่ละ service (คนละ terminal):
+Run each service (separate terminals):
 
 ```bash
-# 1) database (ถ้าไม่มี Postgres ติดตั้งไว้)
+# 1) database (if Postgres is not installed locally)
 docker compose up db
 
 # 2) game server (port 8000)
@@ -76,7 +77,7 @@ cd web && npm install && npm run dev
 ### Run tests
 
 ```bash
-cd engine    && python -m pytest      # กติกา: capture, ko, snapback, scoring, SGF
+cd engine    && python -m pytest      # rules: capture, ko, snapback, scoring, SGF
 cd server    && python -m pytest      # REST + WebSocket + persistence
 cd inference && python -m pytest      # UCT MCTS + HTTP API
 cd training  && python -m pytest      # features, network, PUCT, self-play, checkpoints
@@ -84,48 +85,48 @@ cd training  && python -m pytest      # features, network, PUCT, self-play, chec
 
 ## Training
 
-Hyperparameters ทั้งหมดอยู่ใน [training/config.yaml](training/config.yaml)
+All hyperparameters live in [training/config.yaml](training/config.yaml)
 (board size, blocks/filters, simulations, buffer, learning rate, promotion
-threshold ฯลฯ)
+threshold, etc.)
 
 ```bash
 cd training
-azero-train --config config.yaml            # เริ่มเทรน (auto-fallback เป็น CPU ถ้าไม่มี CUDA)
-azero-train --config config.yaml --resume   # เทรนต่อจาก best.pt + replay buffer เดิม
+azero-train --config config.yaml            # start training (auto-falls back to CPU without CUDA)
+azero-train --config config.yaml --resume   # resume from best.pt + existing replay buffer
 
-tensorboard --logdir runs                   # ดู loss / win rate / promotions
+tensorboard --logdir runs                   # view loss / win rate / promotions
 ```
 
-แต่ละ iteration จะ:
-1. self-play `games_per_iteration` เกมด้วย model best ปัจจุบัน
-   (ขนานกัน `workers` process)
-2. เก็บ `(state, policy, outcome)` ลง replay buffer (persist ลงดิสก์)
-3. เทรน candidate `train_steps_per_iteration` steps
-4. ประกบ candidate กับ best `eval_games` เกม — ชนะ ≥ `promotion_win_rate`
-   ถึง promote เป็น best ใหม่
-5. เขียน checkpoint `checkpoints/iterNNN.pt` (กลายเป็นระดับ bot `az-iterNNN`
-   ใน inference service ทันทีที่ mount)
+Each iteration:
+1. self-plays `games_per_iteration` games with the current best model
+   (in parallel across `workers` processes)
+2. stores `(state, policy, outcome)` in the replay buffer (persisted to disk)
+3. trains a candidate for `train_steps_per_iteration` steps
+4. pits the candidate against best for `eval_games` games — it must win
+   ≥ `promotion_win_rate` to be promoted as the new best
+5. writes checkpoint `checkpoints/iterNNN.pt` (becomes bot level `az-iterNNN`
+   in the inference service as soon as it is mounted)
 
-สร้าง self-play data แยก หรือประกบสอง checkpoint เอง:
+Generate self-play data separately, or pit two checkpoints against each other:
 
 ```bash
 azero-selfplay --config config.yaml --checkpoint checkpoints/best.pt --games 100 --out data.npz
 azero-evaluate checkpoints/iter010.pt checkpoints/iter002.pt --games 20
 ```
 
-GPU: ตั้ง `device: cuda` ใน config (default อยู่แล้ว — fallback เป็น CPU
-อัตโนมัติ) สำหรับ Docker ให้เปลี่ยน base image ใน `training/Dockerfile`
-เป็น CUDA build ตามคอมเมนต์ในไฟล์
+GPU: set `device: cuda` in the config (already the default — falls back to CPU
+automatically). For Docker, switch the base image in `training/Dockerfile` to a
+CUDA build as noted in the file's comments.
 
 ## Gameplay features
 
-- เล่น human vs human (สร้างห้องแล้วให้อีกคน join) หรือ human vs bot
-- เลือกระดับ bot: random / pure MCTS (100/300/800 sims) / AlphaZero checkpoints
-- กระดาน SVG คลิกวาง, แสดง captured stones, ปุ่ม pass/resign, ผลคะแนนตอนจบ
-- History slider ย้อนดูทุกตาเดิน (server replay ผ่าน engine — ไม่มี rule logic ใน frontend)
-- ปุ่ม Analyze + heatmap toggle: แสดง win rate และ policy ของ bot บนกระดาน
-- ดาวน์โหลด SGF ได้ทุกเกม
-- ELO rating สำหรับผู้เล่นที่ลงทะเบียนชื่อ (leaderboard ที่ `GET /api/users`)
+- Play human vs human (create a room and have someone join) or human vs bot
+- Choose bot level: random / pure MCTS (100/300/800 sims) / AlphaZero checkpoints
+- Click-to-place SVG board, captured-stone counts, pass/resign buttons, final score at game end
+- History slider to step through every move (server replays via the engine — no rule logic in the frontend)
+- Analyze button + heatmap toggle: shows the bot's win rate and policy on the board
+- SGF download for every game
+- ELO rating for players who register a name (leaderboard at `GET /api/users`)
 
 ## Environment variables
 
