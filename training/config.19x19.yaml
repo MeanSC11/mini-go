@@ -1,0 +1,49 @@
+# go-bot AlphaZero training configuration — 19x19.
+# Every key mirrors a field of azero.config.Config.
+# Time budget: full board, largest net + deepest search — the dominant share,
+# target ~32h of the ~55h total (biggest slice by design).
+
+# Game
+board_size: 19
+komi: 7.5
+history_planes: 4
+
+# Network
+blocks: 14
+filters: 224
+
+# MCTS
+simulations: 400
+c_puct: 1.5
+dirichlet_alpha: 0.05      # AlphaGo-Zero-style: small alpha for ~361 legal moves
+dirichlet_eps: 0.25
+temperature_moves: 30
+
+# Self-play
+games_per_iteration: 128
+workers: 4                      # CPU path only (selfplay_device: cpu)
+selfplay_device: cuda           # cuda -> batched in-process GPU self-play; auto-falls back to cpu
+selfplay_parallel_games: 64     # concurrent games per GPU batch (0 = auto)
+max_game_moves: 0               # 0 = 2 * board_size^2 (= 722 here)
+
+# Replay buffer
+buffer_size: 400000             # full-board games are long; keep a deep buffer
+min_buffer_size: 8000
+
+# Optimization
+batch_size: 512            # deepest/widest net; peak memory of the three configs
+train_steps_per_iteration: 300
+learning_rate: 0.001
+weight_decay: 0.0001
+value_loss_weight: 1.0
+
+# Evaluation / promotion
+eval_games: 20
+promotion_win_rate: 0.55
+eval_simulations: 200
+
+# Loop / IO
+iterations: 50             # calibrate: iterations = target_hours * 3600 / sec_per_iter
+device: cuda               # automatically falls back to cpu
+run_dir: runs/19x19
+checkpoint_dir: checkpoints/19x19
