@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import List, Optional
 
@@ -15,6 +13,7 @@ from goengine import Color, Game
 
 from azero.batched_selfplay import generate_games_batched
 from azero.checkpoint import build_network, load_checkpoint, resolve_device
+from azero.inference_server import generate_games_server
 from azero.config import Config
 from azero.features import HistoryTracker, encode
 from azero.mcts import MCTS
@@ -103,35 +102,22 @@ def generate_games(
 ) -> List[Sample]:
     """Generate ``total_games`` self-play games.
 
-    On a CUDA self-play device this runs many games concurrently in-process with
-    batched GPU inference. On CPU it falls back to one game per worker process.
+    With ``workers >= 2`` self-play runs as CPU MCTS worker processes feeding a
+    single GPU inference server that batches their leaf evaluations (see
+    :mod:`azero.inference_server`). This parallelizes the tree search across
+    cores and keeps the GPU busy. ``workers == 1`` runs a single in-process game
+    generator (batched on GPU, sequential on CPU).
     """
     device = resolve_device(config.selfplay_device)
+    workers = max(1, min(config.workers, total_games))
+
+    if workers >= 2:
+        return generate_games_server(checkpoint_path, config, total_games, device)
+
     if device.startswith("cuda"):
-        # Batched GPU path: a single process, no subprocesses to spawn.
         net = _load_selfplay_net(checkpoint_path, config, device)
         return generate_games_batched(net, config, total_games)
-
-    # CPU path: parallelism is bounded by the number of games (each game is an
-    # indivisible unit), so more workers than games gives no speed-up.
-    workers = max(1, min(config.workers, total_games))
-    if workers == 1:
-        return _worker_play((checkpoint_path, config.to_dict(), total_games))
-    per_worker = [total_games // workers] * workers
-    for i in range(total_games % workers):
-        per_worker[i] += 1
-    tasks = [
-        (checkpoint_path, config.to_dict(), n) for n in per_worker if n > 0
-    ]
-    samples: List[Sample] = []
-    # Force "spawn" so workers start from a clean interpreter on every platform.
-    # Linux defaults to "fork", which copies the parent's CUDA context and makes
-    # torch raise "Cannot re-initialize CUDA in forked subprocess".
-    mp_context = multiprocessing.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context) as pool:
-        for result in pool.map(_worker_play, tasks):
-            samples.extend(result)
-    return samples
+    return _worker_play((checkpoint_path, config.to_dict(), total_games))
 
 
 def main() -> None:

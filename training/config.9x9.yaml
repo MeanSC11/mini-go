@@ -20,9 +20,9 @@ temperature_moves: 12
 
 # Self-play
 games_per_iteration: 200        # more games = wider inference batch on GPU
-workers: 4                      # CPU path only (selfplay_device: cpu)
-selfplay_device: cuda           # cuda -> batched in-process GPU self-play; auto-falls back to cpu
-selfplay_parallel_games: 128    # concurrent games per GPU batch (0 = auto)
+workers: 16                     # MCTS worker processes; ~= CPU cores (more = bigger GPU batch)
+selfplay_device: cuda           # device for the central inference server; auto-falls back to cpu
+selfplay_parallel_games: 128    # server max batch size (0 = auto: max(workers, 64))
 max_game_moves: 0               # 0 = 2 * board_size^2
 
 # Replay buffer
