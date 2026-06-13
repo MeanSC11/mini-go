@@ -65,6 +65,17 @@ class Config:
     run_dir: str = "runs/default"
     checkpoint_dir: str = "checkpoints"
 
+    # Plateau detection / stopping (the training driver escalates before quitting)
+    max_hours: float = 96.0  # circuit breaker for long production runs
+    stop_on_plateau: bool = True
+    plateau_patience: int = 15  # iters without > threshold ELO gain -> suspect plateau
+    plateau_elo_threshold: float = 10.0  # min internal-ELO gain counted as progress
+    shake_iterations: int = 15  # how long to try shaking out of a plateau
+    shake_lr_factor: float = 0.5  # multiply LR during a shake
+    shake_dirichlet_eps: float = 0.5  # raise root exploration noise during a shake
+    shake_temperature_moves_bonus: int = 10  # explore more openings during a shake
+    shake_sim_multiplier: float = 1.5  # think deeper (higher-quality targets) during a shake
+
     @property
     def move_cap(self) -> int:
         """Maximum moves per self-play game."""

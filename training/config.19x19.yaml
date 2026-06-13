@@ -48,7 +48,18 @@ promotion_win_rate: 0.55
 eval_simulations: 200
 
 # Loop / IO
-iterations: 50             # calibrate: iterations = target_hours * 3600 / sec_per_iter
+iterations: 100000         # effectively uncapped; plateau detection / max_hours decides
 device: cuda               # automatically falls back to cpu
 run_dir: runs/19x19
 checkpoint_dir: checkpoints/19x19
+
+# Plateau detection — train for max strength, escalate before giving up
+max_hours: 90.0            # circuit breaker (leave headroom under a 96h budget)
+stop_on_plateau: true
+plateau_patience: 15       # iters without > threshold ELO gain -> shake
+plateau_elo_threshold: 10.0
+shake_iterations: 15       # try to break out before accepting the ceiling
+shake_lr_factor: 0.5
+shake_dirichlet_eps: 0.5
+shake_temperature_moves_bonus: 10
+shake_sim_multiplier: 1.5

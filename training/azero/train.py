@@ -31,6 +31,7 @@ from azero.checkpoint import (
 )
 from azero.config import Config
 from azero.evaluate import evaluate
+from azero.plateau import PlateauController, TrainingState, final_report
 from azero.replay import ReplayBuffer
 from azero.selfplay import generate_games
 
@@ -166,13 +167,32 @@ def run(config: Config, resume: bool = False) -> None:
         weight_decay=config.weight_decay,
     )
 
+    state_path = run_dir / "training_state.json"
+    state = TrainingState.load(state_path) if resume else TrainingState()
+    controller = PlateauController(config, state)
+    if resume:
+        # Continue past whatever finished last; never redo iterations.
+        start_iteration = max(start_iteration, state.iteration)
+        logger.info("resumed plateau state: best ELO %.0f (%s), mode=%s, iter=%d",
+                    state.best_elo, controller.rank_label, state.mode, state.iteration)
+
     for iteration in range(start_iteration + 1, config.iterations + 1):
+        if controller.elapsed_hours() >= config.max_hours:
+            state.stop_reason = "max_hours"
+            logger.info("max_hours (%.1f h) reached before iteration %d",
+                        config.max_hours, iteration)
+            break
+
         started = time.time()
+        # Self-play uses shake-boosted exploration while escaping a plateau.
+        selfplay_config = controller.effective_selfplay_config()
+        for group in optimizer.param_groups:
+            group["lr"] = controller.current_lr()
         with _GPUSampler(device) as gpu:
             # 1-2. Self-play with the current best model.
             sp_start = time.time()
             samples, sp_stats = generate_games(
-                str(best_path), config, config.games_per_iteration
+                str(best_path), selfplay_config, config.games_per_iteration
             )
             sp_time = max(time.time() - sp_start, 1e-6)
             games_per_sec = config.games_per_iteration / sp_time
@@ -191,6 +211,9 @@ def run(config: Config, resume: bool = False) -> None:
                     iteration, len(buffer), config.min_buffer_size,
                     sp_time, games_per_sec, sp_stats.avg_batch,
                 )
+                state.iteration = iteration
+                controller.tick_time()
+                state.save(state_path)
                 continue
 
             # 3. Train the candidate.
@@ -203,7 +226,8 @@ def run(config: Config, resume: bool = False) -> None:
             writer.add_scalar("loss/value", value_loss, iteration)
             writer.add_scalar("time/train_sec", train_time, iteration)
 
-            # 4. Evaluate against the current best (batched inference).
+            # 4. Evaluate against the current best (batched inference). Eval always
+            # uses the base config (eval_simulations), never shake-boosted values.
             eval_start = time.time()
             best_net, _, _ = load_checkpoint(best_path, device)
             win_rate, wins, losses = evaluate(
@@ -213,29 +237,44 @@ def run(config: Config, resume: bool = False) -> None:
             writer.add_scalar("eval/win_rate", win_rate, iteration)
             writer.add_scalar("time/eval_sec", eval_time, iteration)
             promoted = win_rate >= config.promotion_win_rate
+            # 5a. Track internal ELO; best.pt is always the strongest net so far.
+            candidate_elo = controller.record_eval(win_rate, promoted)
             if promoted:
                 save_checkpoint(candidate, config, iteration, best_path)
             writer.add_scalar("eval/promoted", int(promoted), iteration)
 
-            # 5. Iteration checkpoint (these become the bot strength levels).
+            # 5b. Iteration checkpoint (these become the bot strength levels).
             iter_path = checkpoint_dir / f"iter{iteration:03d}.pt"
             save_checkpoint(candidate, config, iteration, iter_path)
+
+        # 6. Advance the plateau state machine (may decide to stop).
+        action = controller.update()
+        state.iteration = iteration
+        controller.tick_time()
+        state.save(state_path)
 
         iter_time = time.time() - started
         gpu_util = gpu.average
         writer.add_scalar("time/iteration_sec", iter_time, iteration)
+        writer.add_scalar("elo/best", state.best_elo, iteration)
+        writer.add_scalar("elo/candidate", candidate_elo, iteration)
         if gpu_util is not None:
             writer.add_scalar("perf/gpu_util", gpu_util, iteration)
         gpu_str = f"{gpu_util:.0f}%" if gpu_util is not None else "n/a"
         logger.info(
-            "iteration %d: policy %.3f value %.3f eval %.0f%% (%dW/%dL) %s | "
-            "%.1f games/s, avg batch %.0f, gpu %s | "
+            "iteration %d [%s]: policy %.3f value %.3f eval %.0f%% (%dW/%dL) %s | "
+            "ELO best %.0f cand %.0f (%s) | %.1f games/s, avg batch %.0f, gpu %s | "
             "self-play %.0fs, train %.0fs, eval %.0fs, total %.0fs",
-            iteration, policy_loss, value_loss, 100 * win_rate, wins, losses,
+            iteration, state.mode, policy_loss, value_loss, 100 * win_rate, wins, losses,
             "PROMOTED" if promoted else "kept",
+            state.best_elo, candidate_elo, controller.rank_label,
             games_per_sec, sp_stats.avg_batch, gpu_str,
             sp_time, train_time, eval_time, iter_time,
         )
+        if action == "stop":
+            break
+
+    final_report(config, state)
     writer.close()
 
 

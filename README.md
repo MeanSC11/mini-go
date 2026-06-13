@@ -173,6 +173,27 @@ GPU: set `device: cuda` in the config (already the default — falls back to CPU
 automatically). For Docker, switch the base image in `training/Dockerfile` to a
 CUDA build as noted in the file's comments.
 
+### Plateau-aware training (train for max strength)
+
+The loop tracks an internal ELO (candidate vs best each iteration), logs it with
+a rough rank estimate, and always keeps `best.pt` pointing at the strongest
+network so far — you can pull `best.pt` and play/benchmark it mid-run without
+stopping. Stopping is a three-layer policy that tries to push further before
+giving up:
+
+1. **detect** — no >`plateau_elo_threshold` ELO gain for `plateau_patience`
+   iterations ⇒ suspect a plateau;
+2. **shake** — lower the LR, raise self-play exploration (Dirichlet noise +
+   opening temperature) and simulations for `shake_iterations`; if ELO climbs
+   again, resume normal training;
+3. **accept** — if the shake doesn't help, report the ceiling and stop.
+
+A `max_hours` circuit breaker stops the run regardless (set it below your GPU
+budget). State is checkpointed every iteration to `runs/<name>/training_state.json`,
+so `azero-train --config ... --resume` continues a dropped run with ELO/plateau
+state intact. `config.19x19.yaml` is set up for a max-strength run (effectively
+uncapped iterations; `max_hours`/plateau decide when to stop).
+
 ## Serving & measuring strength
 
 Serving is decoupled from training: play strength is governed by how many MCTS
