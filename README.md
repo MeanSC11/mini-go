@@ -173,6 +173,61 @@ GPU: set `device: cuda` in the config (already the default — falls back to CPU
 automatically). For Docker, switch the base image in `training/Dockerfile` to a
 CUDA build as noted in the file's comments.
 
+## Serving & measuring strength
+
+Serving is decoupled from training: play strength is governed by how many MCTS
+**simulations** (or how much **time/move**) you give the bot, using the same
+network. More thinking = stronger play, with no change to the model. At serve
+time evaluations go through a transposition/eval cache and optional BF16/FP16
+(`precision: auto`), and the search is batched/leaf-parallel like self-play.
+
+The inference service reads `GOBOT_INF_AZ_SIMULATIONS` (sims/move) or
+`GOBOT_INF_AZ_TIME_PER_MOVE` (seconds/move; overrides sims when set).
+
+### What rank is this bot? (`azero-benchmark`)
+
+```bash
+# Accurate: calibrate against a reference engine of known rank (GTP).
+azero-benchmark checkpoints/best.pt --sims 400 --games 30 \
+    --reference gnugo --reference-rank 6k
+
+# No reference engine installed -> rough ELO estimate (clearly labelled).
+azero-benchmark checkpoints/best.pt --elo 1800
+```
+
+Two methods, with different trust levels:
+
+- **Reference-calibrated** (accurate): the bot plays N games against a known
+  engine (GNU Go ≈ 5–10 kyu, or Pachi) over GTP; the win rate is converted into
+  a rank *relative to that reference*. GNU Go/Pachi are **optional** — install
+  them only if you want this. Works on whatever board sizes the reference
+  supports (GNU Go: 9/13/19).
+- **ELO estimate** (rough fallback): when no reference engine is found, the
+  internal self-evaluation ELO is mapped to kyu/dan under a stated **assumption**
+  — iteration-0 (random net) ≈ 30 kyu, ~100 ELO per stone. Good for tracking
+  *relative* progress between checkpoints; only a ballpark for real-world rank.
+
+Output always states which method produced the number.
+
+### What can *this machine* run? (`azero-assess`)
+
+Run at serve time to size the speed/strength trade-off to your hardware. It
+detects the GPU/CPU, micro-benchmarks MCTS throughput (~10–20 s), and estimates
+the rank reachable at a given time/move (faster hardware → more sims → stronger):
+
+```bash
+azero-assess checkpoints/best.pt --time 5      # 5 s/move
+```
+```
+Detected: GPU NVIDIA H100 80GB HBM3 (84.9 GB), 64 CPU cores
+This machine runs ~38000 MCTS sims/second
+At 5.0s/move -> ~190000 sims/move
+Estimated playable strength: ~3 dan  (reference-calibrated)
+```
+
+Everything auto-detects hardware and falls back cleanly: GPU→CPU, BF16→FP16→FP32,
+reference-calibrated→ELO estimate. None of this touches the training loop.
+
 ## Gameplay features
 
 - Play human vs human (create a room and have someone join) or human vs bot
@@ -192,5 +247,6 @@ CUDA build as noted in the file's comments.
 | server | `GOBOT_CORS_ORIGINS` | `["http://localhost:3000"]` |
 | inference | `GOBOT_INF_CHECKPOINT_DIR` | `checkpoints` |
 | inference | `GOBOT_INF_AZ_SIMULATIONS` | `160` |
+| inference | `GOBOT_INF_AZ_TIME_PER_MOVE` | _(unset; overrides sims when set)_ |
 | inference | `GOBOT_INF_DEVICE` | `cpu` |
 | web | `NEXT_PUBLIC_API_URL` (build-time) | `http://localhost:8000` |

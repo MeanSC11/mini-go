@@ -1,4 +1,10 @@
-"""Play interface used by the inference service to serve trained models."""
+"""Play interface used by the inference service to serve trained models.
+
+Serving is decoupled from training: strength here is governed by ``simulations``
+(or a per-move ``time_limit``), not the small self-play count. Evaluations run
+through a :class:`~azero.serve.CachingEvaluator` (transposition cache + optional
+BF16/FP16) and a batched, leaf-parallel search.
+"""
 
 from __future__ import annotations
 
@@ -7,25 +13,33 @@ from typing import Dict, Optional, Tuple
 
 from goengine import Game, Move
 
-from azero.checkpoint import load_checkpoint, resolve_device
+from azero.checkpoint import load_checkpoint, resolve_autocast, resolve_device
 from azero.features import HistoryTracker
-from azero.mcts import MCTS
+from azero.serve import CachingEvaluator, serve_search
 
 
 class AlphaZeroPlayer:
     """A bot backed by one checkpoint; thread-safe for sequential calls."""
 
     def __init__(
-        self, checkpoint_path: str, simulations: int = 160, device: str = "cpu"
+        self,
+        checkpoint_path: str,
+        simulations: int = 160,
+        device: str = "cpu",
+        time_limit: Optional[float] = None,
+        leaf_batch: int = 8,
+        precision: str = "auto",
     ) -> None:
         device = resolve_device(device)
         net, config, iteration = load_checkpoint(checkpoint_path, device)
         self.iteration = iteration
-        self.config = dataclasses.replace(
-            config, simulations=simulations, device=device
-        )
+        self.simulations = simulations
+        self.time_limit = time_limit  # seconds/move; overrides simulations when set
+        self.leaf_batch = leaf_batch
+        self.config = dataclasses.replace(config, device=device)
+        autocast_dtype, _ = resolve_autocast(precision, device)
         self.net = net
-        self._mcts = MCTS(self.net, self.config)
+        self._evaluator = CachingEvaluator(net, autocast_dtype)
 
     def search(self, game: Game) -> Tuple[Move, Optional[float], Dict[str, float]]:
         """Choose a move; returns (move, side-to-move win rate, policy dict).
@@ -47,17 +61,21 @@ class AlphaZeroPlayer:
                 break
             replay.play(move)
             tracker.push(replay.board)
-        move, policy, value = self._mcts.choose_move(
-            replay, tracker, temperature=0.0, add_noise=False
+
+        move, win_rate, visits = serve_search(
+            self._evaluator, replay, tracker, self.config,
+            max_simulations=None if self.time_limit else self.simulations,
+            time_limit=self.time_limit,
+            leaf_batch=self.leaf_batch,
         )
+
         size = game.board_size
         policy_dict: Dict[str, float] = {}
-        for index, prob in enumerate(policy):
+        for index, prob in enumerate(visits):
             if prob <= 0:
                 continue
             if index == size * size:
                 policy_dict["pass"] = float(prob)
             else:
                 policy_dict[f"{index // size},{index % size}"] = float(prob)
-        win_rate = (1.0 + value) / 2.0  # tanh value -> probability
         return move, win_rate, policy_dict

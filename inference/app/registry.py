@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     checkpoint_dir: str = "checkpoints"
     az_simulations: int = 160
+    az_time_per_move: Optional[float] = None  # seconds/move; overrides sims when set
     mcts_levels: List[int] = [100, 300, 800]
     device: str = "cpu"
 
@@ -70,10 +71,14 @@ class _UctAdapter:
 class _AzeroAdapter:
     """Lazy-loading AlphaZero bot bound to one checkpoint file."""
 
-    def __init__(self, checkpoint_path: Path, simulations: int, device: str) -> None:
+    def __init__(
+        self, checkpoint_path: Path, simulations: int, device: str,
+        time_limit: Optional[float] = None,
+    ) -> None:
         self._path = checkpoint_path
         self._simulations = simulations
         self._device = device
+        self._time_limit = time_limit
         self._player = None
 
     def _load(self):
@@ -81,7 +86,8 @@ class _AzeroAdapter:
             from azero.bot import AlphaZeroPlayer  # requires torch
 
             self._player = AlphaZeroPlayer(
-                str(self._path), simulations=self._simulations, device=self._device
+                str(self._path), simulations=self._simulations, device=self._device,
+                time_limit=self._time_limit,
             )
         return self._player
 
@@ -135,7 +141,10 @@ def get_bot(level: str) -> Bot:
         stem = level[3:]
         path = Path(settings.checkpoint_dir) / f"{stem}.pt"
         if path.is_file():
-            bot = _AzeroAdapter(path, settings.az_simulations, settings.device)
+            bot = _AzeroAdapter(
+                path, settings.az_simulations, settings.device,
+                time_limit=settings.az_time_per_move,
+            )
         else:
             logger.warning("checkpoint %s not found; using random bot", path)
             bot = RandomBot()

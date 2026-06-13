@@ -22,6 +22,8 @@ dev = ["pytest>=7.4"]
 azero-train = "azero.train:main"
 azero-selfplay = "azero.selfplay:main"
 azero-evaluate = "azero.evaluate:main"
+azero-assess = "azero.serve:main"
+azero-benchmark = "azero.benchmark:main"
 
 [tool.setuptools.packages.find]
 include = ["azero*"]
