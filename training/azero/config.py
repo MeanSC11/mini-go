@@ -28,13 +28,20 @@ class Config:
     dirichlet_alpha: float = 0.3
     dirichlet_eps: float = 0.25
     temperature_moves: int = 12  # sample with T=1 for this many opening moves
+    mcts_leaf_batch: int = 1  # leaves gathered per game per round; >1 uses virtual loss
+    virtual_loss: float = 1.0  # discourages parallel descents from sharing a path
 
     # Self-play
     games_per_iteration: int = 50
     workers: int = 2
-    selfplay_device: str = "cpu"  # worker inference device; cuda -> batched GPU self-play
-    selfplay_parallel_games: int = 0  # concurrent games per GPU batch (0 -> auto)
+    selfplay_device: str = "cpu"  # device for the inference server; cuda -> GPU server
+    selfplay_concurrent_games: int = 16  # games in flight per worker (batch multiplier)
     max_game_moves: int = 0  # 0 -> 2 * board_size^2
+
+    # Inference server (batched GPU evaluation during self-play)
+    inference_max_batch: int = 256  # fire a forward once this many positions are queued
+    inference_timeout_ms: float = 5.0  # ...or after this long, whichever comes first
+    precision: str = "auto"  # auto|bf16|fp16|fp32 autocast for inference + training
 
     # Replay buffer
     buffer_size: int = 100_000

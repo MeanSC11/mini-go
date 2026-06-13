@@ -81,19 +81,24 @@ class PolicyValueNet(nn.Module):
 
     @torch.no_grad()
     def predict_many(
-        self, planes: "np.ndarray"
+        self, planes: "np.ndarray", autocast_dtype=None
     ) -> Tuple["np.ndarray", "np.ndarray"]:
         """Batched inference: evaluate ``N`` positions in one forward pass.
 
         ``planes`` is ``(N, C, H, W)`` float32. Returns ``(policies, values)``
         as numpy arrays of shape ``(N, policy_size)`` and ``(N,)``. This is the
         path that keeps a GPU busy during self-play — one big batch instead of
-        ``N`` separate batch-1 calls.
+        ``N`` separate batch-1 calls. ``autocast_dtype`` (e.g. ``torch.bfloat16``)
+        enables mixed-precision inference on CUDA.
         """
         self.eval()
         device = next(self.parameters()).device
         x = torch.from_numpy(planes).to(device, non_blocking=True)
-        logits, value = self.forward(x)
-        policies = F.softmax(logits, dim=1).cpu().numpy()
-        values = value.reshape(-1).cpu().numpy()
+        if autocast_dtype is not None and device.type == "cuda":
+            with torch.autocast(device_type="cuda", dtype=autocast_dtype):
+                logits, value = self.forward(x)
+        else:
+            logits, value = self.forward(x)
+        policies = F.softmax(logits.float(), dim=1).cpu().numpy()
+        values = value.float().reshape(-1).cpu().numpy()
         return policies, values

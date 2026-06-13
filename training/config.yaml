@@ -19,10 +19,15 @@ temperature_moves: 12
 
 # Self-play
 games_per_iteration: 256        # raise on GPU: more games = wider inference batch
-workers: 16                     # MCTS worker processes; ~= CPU cores (more = bigger GPU batch)
+workers: 16                     # MCTS worker processes; ~= CPU cores
 selfplay_device: cuda           # device for the central inference server; auto-falls back to cpu
-selfplay_parallel_games: 128    # server max batch size (0 = auto: max(workers, 64))
+selfplay_concurrent_games: 16   # games in flight per worker (batch multiplier)
 max_game_moves: 0               # 0 = 2 * board_size^2
+
+# Inference server (batched GPU evaluation)
+inference_max_batch: 256        # fire a forward once this many positions are queued...
+inference_timeout_ms: 5.0       # ...or after this long, whichever comes first
+precision: auto                 # auto|bf16|fp16|fp32 (auto: bf16 on Ampere+/Hopper)
 
 # Replay buffer
 buffer_size: 100000

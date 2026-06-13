@@ -5,20 +5,26 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
 from goengine import Color, Game
 
 from azero.batched_selfplay import generate_games_batched
-from azero.checkpoint import build_network, load_checkpoint, resolve_device
+from azero.checkpoint import (
+    build_network,
+    load_checkpoint,
+    resolve_autocast,
+    resolve_device,
+)
 from azero.inference_server import generate_games_server
 from azero.config import Config
 from azero.features import HistoryTracker, encode
 from azero.mcts import MCTS
 from azero.network import PolicyValueNet
 from azero.replay import Sample
+from azero.selfplay_engine import SelfPlayStats
 
 logger = logging.getLogger(__name__)
 
@@ -67,24 +73,6 @@ def _winner(game: Game) -> Color:
     return Color.EMPTY
 
 
-def _worker_play(args: tuple) -> List[Sample]:
-    """Process-pool entry point: load weights from disk and play games."""
-    checkpoint_path, config_dict, games = args
-    config = Config(**config_dict)
-    # Self-play workers run on their own device (CPU by default) so a forked or
-    # spawned worker never re-initializes the parent's training CUDA context.
-    device = resolve_device(config.selfplay_device)
-    if checkpoint_path and Path(checkpoint_path).is_file():
-        net, _, _ = load_checkpoint(checkpoint_path, device)
-    else:
-        net = build_network(config, device)
-        net.eval()
-    samples: List[Sample] = []
-    for _ in range(games):
-        samples.extend(play_game(net, config))
-    return samples
-
-
 def _load_selfplay_net(
     checkpoint_path: Optional[str], config: Config, device: str
 ) -> PolicyValueNet:
@@ -99,14 +87,14 @@ def _load_selfplay_net(
 
 def generate_games(
     checkpoint_path: Optional[str], config: Config, total_games: int
-) -> List[Sample]:
-    """Generate ``total_games`` self-play games.
+) -> Tuple[List[Sample], SelfPlayStats]:
+    """Generate ``total_games`` self-play games; return ``(samples, stats)``.
 
-    With ``workers >= 2`` self-play runs as CPU MCTS worker processes feeding a
-    single GPU inference server that batches their leaf evaluations (see
-    :mod:`azero.inference_server`). This parallelizes the tree search across
-    cores and keeps the GPU busy. ``workers == 1`` runs a single in-process game
-    generator (batched on GPU, sequential on CPU).
+    With ``workers >= 2`` self-play runs as game-parallel MCTS worker processes
+    feeding a single inference server that batches their leaf evaluations across
+    workers (see :mod:`azero.inference_server`) -- tree search spreads across
+    cores while the GPU sees large batches. ``workers == 1`` runs a single
+    in-process game-parallel generator (good for one-GPU boxes).
     """
     device = resolve_device(config.selfplay_device)
     workers = max(1, min(config.workers, total_games))
@@ -114,10 +102,11 @@ def generate_games(
     if workers >= 2:
         return generate_games_server(checkpoint_path, config, total_games, device)
 
-    if device.startswith("cuda"):
-        net = _load_selfplay_net(checkpoint_path, config, device)
-        return generate_games_batched(net, config, total_games)
-    return _worker_play((checkpoint_path, config.to_dict(), total_games))
+    net = _load_selfplay_net(checkpoint_path, config, device)
+    autocast_dtype, _ = resolve_autocast(config.precision, device)
+    stats = SelfPlayStats()
+    samples = generate_games_batched(net, config, total_games, autocast_dtype, stats)
+    return samples, stats
 
 
 def main() -> None:
@@ -132,7 +121,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     config = Config.load(args.config)
     games = args.games or config.games_per_iteration
-    samples = generate_games(args.checkpoint, config, games)
+    samples, stats = generate_games(args.checkpoint, config, games)
+    logger.info("self-play avg batch %.1f over %d forwards", stats.avg_batch, stats.forward_calls)
     states = np.stack([s[0] for s in samples])
     policies = np.stack([s[1] for s in samples])
     values = np.asarray([s[2] for s in samples], dtype=np.float32)

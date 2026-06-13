@@ -1,65 +1,50 @@
 """Batched-inference self-play: CPU MCTS workers + one central GPU evaluator.
 
-Architecture (all processes use the "spawn" start method, so no worker ever
-inherits the parent's CUDA context):
-
     worker 0 ─┐                         ┌─> response_q[0] ─> worker 0
     worker 1 ─┼─> request_q ─> server ──┼─> response_q[1] ─> worker 1
-      ...     │   (holds the model      │      ...
-    worker N ─┘    on the GPU)          └─> response_q[N] ─> worker N
+      ...     │   (model on GPU,        │      ...
+    worker N ─┘    batches requests)    └─> response_q[N] ─> worker N
 
-Each worker runs MCTS for its share of games (pure-Python, CPU-bound) and, for
-every leaf it needs evaluated, sends the encoded planes to the server and blocks
-for the result. The server drains all requests currently queued, stacks them
-into one batch, runs a single GPU forward pass, and scatters the results back.
-
-This fixes both problems of the single-process design:
-  * MCTS now runs across N cores instead of one (no more one core at 100%);
-  * the GPU sees real batches instead of batch-1 calls (no more ~1% util).
+Each worker runs game-parallel MCTS (``azero.selfplay_engine``) and, every round,
+sends all of its pending leaves as one request. The server accumulates requests
+from every worker until it has ``inference_max_batch`` positions or
+``inference_timeout_ms`` elapses, runs a single (optionally mixed-precision)
+forward pass, and scatters the results back. All processes use the "spawn" start
+method, so no worker ever inherits the parent's CUDA context.
 """
 
 from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+import time
 from pathlib import Path
 from queue import Empty
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
 from azero.config import Config
 from azero.replay import Sample
+from azero.selfplay_engine import SelfPlayStats
 
 logger = logging.getLogger(__name__)
 
-# Sentinel pushed onto the request queue to tell the server to shut down.
-_STOP = None
+_STOP = None  # sentinel pushed onto request_q to shut the server down
 
 
 class RemoteEvaluator:
-    """Drop-in for ``PolicyValueNet.predict`` backed by the inference server.
-
-    :class:`azero.mcts.MCTS` only ever calls ``net.predict(tensor)``, so a worker
-    can hand it one of these instead of a real network and every leaf evaluation
-    is transparently offloaded to the GPU server.
-    """
+    """``evaluate(planes) -> (policies, values)`` backed by the GPU server."""
 
     def __init__(self, worker_id: int, request_q: "mp.Queue", response_q: "mp.Queue") -> None:
         self.worker_id = worker_id
         self.request_q = request_q
         self.response_q = response_q
 
-    def predict(self, planes):
-        # ``planes`` is the torch tensor MCTS built via torch.from_numpy(...).
-        if hasattr(planes, "detach"):
-            arr = planes.detach().cpu().numpy()
-        else:
-            arr = np.asarray(planes, dtype=np.float32)
-        arr = np.ascontiguousarray(arr, dtype=np.float32)
+    def __call__(self, planes: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        arr = np.ascontiguousarray(planes, dtype=np.float32)
         self.request_q.put((self.worker_id, arr))
-        policy, value = self.response_q.get()
-        return policy, value
+        return self.response_q.get()
 
 
 def _inference_server_loop(
@@ -68,49 +53,86 @@ def _inference_server_loop(
     device: str,
     request_q: "mp.Queue",
     response_qs: List["mp.Queue"],
-    max_batch: int,
+    stats_q: "mp.Queue",
 ) -> None:
-    """Server process: hold the model on ``device``, batch and answer requests."""
+    """Server process: hold the model, batch requests with a size/time cap."""
     import torch  # imported in the child so workers never import CUDA
 
-    from azero.checkpoint import build_network, load_checkpoint
+    from azero.checkpoint import build_network, load_checkpoint, resolve_autocast
 
     config = Config(**config_dict)
     if device.startswith("cuda"):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
+    autocast_dtype, precision_label = resolve_autocast(config.precision, device)
 
     if checkpoint_path and Path(checkpoint_path).is_file():
         net, _, _ = load_checkpoint(checkpoint_path, device)
     else:
         net = build_network(config, device)
         net.eval()
-    logger.info("inference server ready on %s (max_batch=%d)", device, max_batch)
+
+    max_batch = max(1, config.inference_max_batch)
+    timeout_s = max(0.0, config.inference_timeout_ms / 1000.0)
+    logger.info(
+        "inference server ready on %s (precision=%s, max_batch=%d, timeout=%.1fms)",
+        device, precision_label, max_batch, config.inference_timeout_ms,
+    )
+
+    pending: List[Tuple[int, np.ndarray]] = []
+    pend_total = 0
+    deadline = 0.0
+    total_calls = 0
+    total_positions = 0
+    max_seen = 0
+
+    def fire() -> None:
+        nonlocal pending, pend_total, total_calls, total_positions, max_seen
+        if not pending:
+            return
+        arr = np.concatenate([a for _, a in pending], axis=0)
+        policies, values = net.predict_many(arr, autocast_dtype)
+        offset = 0
+        for worker_id, a in pending:
+            n = len(a)
+            response_qs[worker_id].put((policies[offset:offset + n], values[offset:offset + n]))
+            offset += n
+        total_calls += 1
+        total_positions += len(arr)
+        max_seen = max(max_seen, len(arr))
+        pending = []
+        pend_total = 0
 
     while True:
-        first = request_q.get()
-        if first is _STOP:
-            break
-        batch = [first]
-        stop = False
-        while len(batch) < max_batch:
-            try:
-                item = request_q.get_nowait()
-            except Empty:
-                break
+        if not pending:
+            item = request_q.get()
             if item is _STOP:
-                stop = True
                 break
-            batch.append(item)
+            worker_id, arr = item
+            pending.append((worker_id, arr))
+            pend_total += len(arr)
+            deadline = time.monotonic() + timeout_s
+            continue
 
-        planes = np.stack([arr for _, arr in batch])
-        policies, values = net.predict_many(planes)
-        for (worker_id, _), policy, value in zip(batch, policies, values):
-            response_qs[worker_id].put((policy, float(value)))
+        if pend_total >= max_batch or time.monotonic() >= deadline:
+            fire()
+            continue
 
-        if stop:
+        try:
+            item = request_q.get(timeout=max(0.0, deadline - time.monotonic()))
+        except Empty:
+            fire()
+            continue
+        if item is _STOP:
+            fire()
             break
+        worker_id, arr = item
+        pending.append((worker_id, arr))
+        pend_total += len(arr)
+
+    fire()
+    stats_q.put((total_calls, total_positions, max_seen))
 
 
 def _selfplay_worker(
@@ -121,16 +143,16 @@ def _selfplay_worker(
     response_q: "mp.Queue",
     result_q: "mp.Queue",
 ) -> None:
-    """Worker process: run MCTS self-play, offloading evaluation to the server."""
+    """Worker process: game-parallel MCTS, offloading evaluation to the server."""
     try:
         # Deferred import keeps azero.selfplay <-> azero.inference_server acyclic.
-        from azero.selfplay import play_game
+        from azero.selfplay_engine import run_self_play
 
         config = Config(**config_dict)
         evaluator = RemoteEvaluator(worker_id, request_q, response_q)
-        samples: List[Sample] = []
-        for _ in range(games):
-            samples.extend(play_game(evaluator, config))
+        samples = run_self_play(
+            evaluator, config, games, config.selfplay_concurrent_games
+        )
         result_q.put((worker_id, samples))
     except BaseException as exc:  # report instead of hanging the parent
         import traceback
@@ -141,7 +163,7 @@ def _selfplay_worker(
 
 def generate_games_server(
     checkpoint_path: Optional[str], config: Config, total_games: int, device: str
-) -> List[Sample]:
+) -> Tuple[List[Sample], SelfPlayStats]:
     """Run ``total_games`` self-play games via CPU workers + a GPU server."""
     workers = max(1, min(config.workers, total_games))
     per_worker = [total_games // workers] * workers
@@ -149,17 +171,17 @@ def generate_games_server(
         per_worker[i] += 1
     per_worker = [n for n in per_worker if n > 0]
     workers = len(per_worker)
-    max_batch = config.selfplay_parallel_games or max(workers, 64)
 
     ctx = mp.get_context("spawn")
     request_q: "mp.Queue" = ctx.Queue()
     response_qs: List["mp.Queue"] = [ctx.Queue() for _ in range(workers)]
     result_q: "mp.Queue" = ctx.Queue()
+    stats_q: "mp.Queue" = ctx.Queue()
     config_dict = config.to_dict()
 
     server = ctx.Process(
         target=_inference_server_loop,
-        args=(checkpoint_path, config_dict, device, request_q, response_qs, max_batch),
+        args=(checkpoint_path, config_dict, device, request_q, response_qs, stats_q),
         daemon=True,
     )
     server.start()
@@ -178,7 +200,7 @@ def generate_games_server(
     try:
         while collected < workers:
             try:
-                worker_id, payload = result_q.get(timeout=30)
+                worker_id, payload = result_q.get(timeout=60)
             except Empty:
                 if server.exitcode is not None:
                     raise RuntimeError(
@@ -195,7 +217,7 @@ def generate_games_server(
                 raise RuntimeError(f"self-play worker {worker_id} failed: {payload!r}")
             samples.extend(payload)
     finally:
-        request_q.put(_STOP)  # ask the server to drain and exit
+        request_q.put(_STOP)
         for p in procs:
             p.join(timeout=30)
         server.join(timeout=30)
@@ -203,4 +225,9 @@ def generate_games_server(
             if p.is_alive():
                 p.terminate()
 
-    return samples
+    try:
+        calls, positions, _max_seen = stats_q.get(timeout=5)
+    except Empty:
+        calls, positions = 0, 0
+    stats = SelfPlayStats(games=total_games, positions=positions, forward_calls=calls)
+    return samples, stats
