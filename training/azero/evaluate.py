@@ -3,41 +3,17 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import logging
 from typing import Tuple
 
-from goengine import Color, Game
+from goengine import Color
 
-from azero.checkpoint import load_checkpoint, resolve_device
+from azero.checkpoint import load_checkpoint, resolve_autocast, resolve_device
 from azero.config import Config
-from azero.features import HistoryTracker
-from azero.mcts import MCTS
 from azero.network import PolicyValueNet
+from azero.selfplay_engine import run_evaluation
 
 logger = logging.getLogger(__name__)
-
-
-def play_match_game(
-    black_net: PolicyValueNet, white_net: PolicyValueNet, config: Config
-) -> Color:
-    """Play one evaluation game (greedy moves, no noise); return the winner."""
-    eval_config = dataclasses.replace(config, simulations=config.eval_simulations)
-    game = Game(config.board_size, config.komi)
-    tracker = HistoryTracker(config.history_planes, game.board)
-    players = {Color.BLACK: MCTS(black_net, eval_config),
-               Color.WHITE: MCTS(white_net, eval_config)}
-    for _ in range(config.move_cap):
-        if game.is_over:
-            break
-        mcts = players[game.current_player]
-        move, _, _ = mcts.choose_move(game, tracker, temperature=0.0, add_noise=False)
-        game.play(move)
-        tracker.push(game.board)
-    if game.result is not None:
-        return game.result.winner
-    black, white = game.score()
-    return Color.BLACK if black > white else Color.WHITE
 
 
 def evaluate(
@@ -46,21 +22,36 @@ def evaluate(
     config: Config,
     games: int,
 ) -> Tuple[float, int, int]:
-    """Pit challenger vs incumbent, alternating colors.
+    """Pit challenger vs incumbent, alternating colors, with batched inference.
 
-    Returns ``(challenger_win_rate, wins, losses)``; draws count half.
+    All ``games`` run concurrently; each round buckets pending leaves by which
+    network the side to move uses and fires one batched forward per network --
+    the same speed-up self-play gets, applied to evaluation. Moves are greedy
+    with no Dirichlet noise (deterministic match play). Returns
+    ``(challenger_win_rate, wins, losses)``; draws count half.
     """
-    wins = 0
-    losses = 0
-    draws = 0
-    for i in range(games):
-        if i % 2 == 0:
-            winner = play_match_game(challenger, incumbent, config)
-            challenger_color = Color.BLACK
-        else:
-            winner = play_match_game(incumbent, challenger, config)
-            challenger_color = Color.WHITE
-        if winner is Color.EMPTY:
+    device = next(challenger.parameters()).device
+    dev_str = "cuda" if device.type == "cuda" else "cpu"
+    autocast_dtype, _ = resolve_autocast(config.precision, dev_str)
+    # key 0 -> challenger, key 1 -> incumbent.
+    evaluate_fns = (
+        lambda arr: challenger.predict_many(arr, autocast_dtype),
+        lambda arr: incumbent.predict_many(arr, autocast_dtype),
+    )
+    specs = [
+        {Color.BLACK: 0, Color.WHITE: 1} if i % 2 == 0
+        else {Color.BLACK: 1, Color.WHITE: 0}
+        for i in range(games)
+    ]
+    concurrent = min(games, max(1, config.selfplay_concurrent_games))
+    winners = run_evaluation(
+        evaluate_fns, config, specs, concurrent, config.eval_simulations
+    )
+
+    wins = losses = draws = 0
+    for i, winner in enumerate(winners):
+        challenger_color = Color.BLACK if i % 2 == 0 else Color.WHITE
+        if winner is None or winner is Color.EMPTY:
             draws += 1
         elif winner is challenger_color:
             wins += 1

@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 
 class _GPUSampler:
-    """Average GPU utilization over a block by polling in a background thread."""
+    """Average GPU utilization over a block by polling NVML in a background thread."""
 
     def __init__(self, device: str, interval: float = 0.2) -> None:
         self.device = device
@@ -46,24 +46,40 @@ class _GPUSampler:
         self._samples: list = []
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._nvml = None
+        self._handle = None
 
     def __enter__(self) -> "_GPUSampler":
         if self.device.startswith("cuda"):
-            self._thread = threading.Thread(target=self._run, daemon=True)
-            self._thread.start()
+            try:
+                import pynvml
+
+                pynvml.nvmlInit()
+                self._nvml = pynvml
+                self._handle = pynvml.nvmlDeviceGetHandleByIndex(torch.cuda.current_device())
+                self._thread = threading.Thread(target=self._run, daemon=True)
+                self._thread.start()
+            except Exception as exc:  # missing pynvml/driver -> report n/a
+                logger.debug("GPU utilization sampling unavailable: %r", exc)
+                self._handle = None
         return self
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval):
             try:
-                self._samples.append(torch.cuda.utilization())
+                self._samples.append(self._nvml.nvmlDeviceGetUtilizationRates(self._handle).gpu)
             except Exception:
-                return  # pynvml unavailable; give up quietly
+                return
 
     def __exit__(self, *exc) -> None:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
+        if self._nvml is not None:
+            try:
+                self._nvml.nvmlShutdown()
+            except Exception:
+                pass
 
     @property
     def average(self) -> Optional[float]:
@@ -178,18 +194,24 @@ def run(config: Config, resume: bool = False) -> None:
                 continue
 
             # 3. Train the candidate.
+            train_start = time.time()
             policy_loss, value_loss = train_steps(
                 candidate, optimizer, buffer, config, device, autocast_dtype, scaler
             )
+            train_time = time.time() - train_start
             writer.add_scalar("loss/policy", policy_loss, iteration)
             writer.add_scalar("loss/value", value_loss, iteration)
+            writer.add_scalar("time/train_sec", train_time, iteration)
 
-            # 4. Evaluate against the current best.
+            # 4. Evaluate against the current best (batched inference).
+            eval_start = time.time()
             best_net, _, _ = load_checkpoint(best_path, device)
             win_rate, wins, losses = evaluate(
                 candidate, best_net, config, config.eval_games
             )
+            eval_time = time.time() - eval_start
             writer.add_scalar("eval/win_rate", win_rate, iteration)
+            writer.add_scalar("time/eval_sec", eval_time, iteration)
             promoted = win_rate >= config.promotion_win_rate
             if promoted:
                 save_checkpoint(candidate, config, iteration, best_path)
@@ -207,10 +229,12 @@ def run(config: Config, resume: bool = False) -> None:
         gpu_str = f"{gpu_util:.0f}%" if gpu_util is not None else "n/a"
         logger.info(
             "iteration %d: policy %.3f value %.3f eval %.0f%% (%dW/%dL) %s | "
-            "%.1f games/s, avg batch %.0f, gpu %s | self-play %.0fs, total %.0fs",
+            "%.1f games/s, avg batch %.0f, gpu %s | "
+            "self-play %.0fs, train %.0fs, eval %.0fs, total %.0fs",
             iteration, policy_loss, value_loss, 100 * win_rate, wins, losses,
             "PROMOTED" if promoted else "kept",
-            games_per_sec, sp_stats.avg_batch, gpu_str, sp_time, iter_time,
+            games_per_sec, sp_stats.avg_batch, gpu_str,
+            sp_time, train_time, eval_time, iter_time,
         )
     writer.close()
 

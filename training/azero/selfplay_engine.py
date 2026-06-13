@@ -115,17 +115,41 @@ def _winner(game: Game) -> Color:
 
 
 class _GameSearch:
-    """A single self-play game whose MCTS yields leaves for external batching."""
+    """A single game whose MCTS yields leaves for external batching.
 
-    def __init__(self, config: Config) -> None:
+    Self-play uses the defaults (root noise, temperature sampling, samples
+    recorded). Evaluation passes ``add_noise=False``, ``greedy=True``,
+    ``record_samples=False``, its own ``simulations``, and a ``key_by_color``
+    map so the coordinator can route each side's leaves to the right network.
+    """
+
+    def __init__(
+        self,
+        config: Config,
+        simulations: Optional[int] = None,
+        add_noise: bool = True,
+        record_samples: bool = True,
+        greedy: bool = False,
+        key_by_color: Optional[dict] = None,
+    ) -> None:
         self.config = config
+        self.simulations = simulations if simulations is not None else config.simulations
+        self.add_noise = add_noise
+        self.record_samples = record_samples
+        self.greedy = greedy
+        self.key_by_color = key_by_color
         self.game = Game(config.board_size, config.komi)
         self.tracker = HistoryTracker(config.history_planes, self.game.board)
         self.move_number = 0
         self.done = False
+        self.winner: Optional[Color] = None
         self.samples: List[Sample] = []
         self._sample_pending: List[Tuple[np.ndarray, np.ndarray, Color]] = []
         self._start_move()
+
+    def current_key(self):
+        """Which evaluator the side to move needs (for two-network eval)."""
+        return self.key_by_color[self.game.current_player] if self.key_by_color else 0
 
     def _start_move(self) -> None:
         self.root = Node(prior=1.0)
@@ -156,12 +180,12 @@ class _GameSearch:
         self._leaves = []
         self._pending_ids = set()
         planes: List[np.ndarray] = []
-        budget = cfg.simulations - self.descents
+        budget = self.simulations - self.descents
         if budget <= 0:
             return []
         want = min(max(1, cfg.mcts_leaf_batch), budget)
         guard = 0
-        while len(planes) < want and self.descents < cfg.simulations and guard < want * 4:
+        while len(planes) < want and self.descents < self.simulations and guard < want * 4:
             guard += 1
             result = self._descend()
             if result is None:  # terminal leaf, already backed up + counted
@@ -203,7 +227,8 @@ class _GameSearch:
         """Apply the evaluations requested by the last ``collect()``."""
         if self._root_request:
             _expand_node(self.root, self.game, policies[0], self.config)
-            self._add_dirichlet_noise(self.root)
+            if self.add_noise:
+                self._add_dirichlet_noise(self.root)
             self.root_expanded = True
             self._root_request = False
             return
@@ -215,7 +240,7 @@ class _GameSearch:
         self._pending_ids = set()
 
     def move_ready(self) -> bool:
-        return self.root_expanded and self.descents >= self.config.simulations
+        return self.root_expanded and self.descents >= self.simulations
 
     # -- move completion ---------------------------------------------------
 
@@ -228,9 +253,10 @@ class _GameSearch:
         if total > 0:
             visits /= total
 
-        player = self.game.current_player
-        assert self.root_planes is not None
-        self._sample_pending.append((self.root_planes, visits, player))
+        if self.record_samples:
+            player = self.game.current_player
+            assert self.root_planes is not None
+            self._sample_pending.append((self.root_planes, visits, player))
 
         move = self._select_move(visits)
         self.game.play(move)
@@ -244,7 +270,10 @@ class _GameSearch:
     def _select_move(self, policy: np.ndarray) -> Move:
         if policy.sum() == 0:
             return Move.pass_turn()
-        temperature = 1.0 if self.move_number < self.config.temperature_moves else 0.0
+        temperature = (
+            0.0 if self.greedy or self.move_number >= self.config.temperature_moves
+            else 1.0
+        )
         if temperature <= 1e-6:
             index = int(policy.argmax())
         else:
@@ -254,12 +283,12 @@ class _GameSearch:
         return index_to_move(index, self.config.board_size)
 
     def _finalize(self) -> None:
-        winner = _winner(self.game)
+        self.winner = _winner(self.game)
         for planes, policy, player in self._sample_pending:
-            if winner is Color.EMPTY:
+            if self.winner is Color.EMPTY:
                 z = 0.0
             else:
-                z = 1.0 if winner is player else -1.0
+                z = 1.0 if self.winner is player else -1.0
             self.samples.append((planes, policy, z))
         self.done = True
 
@@ -357,3 +386,68 @@ def run_self_play(
         active = still
 
     return samples
+
+
+def run_evaluation(
+    evaluate_fns,
+    config: Config,
+    specs: List[dict],
+    concurrent: int,
+    eval_simulations: int,
+    stats: Optional[SelfPlayStats] = None,
+) -> List[Optional[Color]]:
+    """Play one greedy game per ``spec`` (a ``{Color: key}`` net assignment).
+
+    Leaves are bucketed by which network the side to move needs, so each round
+    fires at most one batched forward per network. Returns the winner of each
+    game aligned to ``specs``.
+    """
+    total = len(specs)
+    concurrent = max(1, min(concurrent, total))
+    winners: List[Optional[Color]] = [None] * total
+    next_idx = 0
+    active: List[Tuple[_GameSearch, int]] = []
+
+    while next_idx < total or active:
+        while len(active) < concurrent and next_idx < total:
+            gs = _GameSearch(
+                config, simulations=eval_simulations, add_noise=False,
+                record_samples=False, greedy=True, key_by_color=specs[next_idx],
+            )
+            active.append((gs, next_idx))
+            next_idx += 1
+        if not active:
+            break
+
+        buckets: dict = {}  # key -> list of (gs, planes)
+        for gs, _idx in active:
+            planes = gs.collect()
+            if planes:
+                buckets.setdefault(gs.current_key(), []).append((gs, planes))
+        for key, items in buckets.items():
+            batch: List[np.ndarray] = []
+            slices: List[Tuple[_GameSearch, int, int]] = []
+            for gs, planes in items:
+                slices.append((gs, len(batch), len(planes)))
+                batch.extend(planes)
+            arr = np.stack(batch)
+            policies, values = evaluate_fns[key](arr)
+            if stats is not None:
+                stats.forward_calls += 1
+                stats.positions += len(batch)
+            for gs, start, count in slices:
+                gs.consume(policies[start:start + count], values[start:start + count])
+
+        still: List[Tuple[_GameSearch, int]] = []
+        for gs, idx in active:
+            if gs.move_ready():
+                gs.commit_move()
+            if gs.done:
+                winners[idx] = gs.winner
+                if stats is not None:
+                    stats.games += 1
+            else:
+                still.append((gs, idx))
+        active = still
+
+    return winners

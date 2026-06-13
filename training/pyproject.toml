@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.26",
     "pyyaml>=6.0",
     "tensorboard>=2.16",
+    "nvidia-ml-py>=12.0",  # GPU utilization telemetry (pynvml); optional at runtime
 ]
 
 [project.optional-dependencies]
