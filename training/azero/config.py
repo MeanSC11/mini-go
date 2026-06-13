@@ -32,6 +32,8 @@ class Config:
     # Self-play
     games_per_iteration: int = 50
     workers: int = 2
+    selfplay_device: str = "cpu"  # worker inference device; cuda -> batched GPU self-play
+    selfplay_parallel_games: int = 0  # concurrent games per GPU batch (0 -> auto)
     max_game_moves: int = 0  # 0 -> 2 * board_size^2
 
     # Replay buffer

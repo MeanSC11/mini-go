@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -77,3 +78,22 @@ class PolicyValueNet(nn.Module):
         x = planes.unsqueeze(0).to(next(self.parameters()).device)
         logits, value = self.forward(x)
         return F.softmax(logits[0], dim=0).cpu(), float(value.item())
+
+    @torch.no_grad()
+    def predict_many(
+        self, planes: "np.ndarray"
+    ) -> Tuple["np.ndarray", "np.ndarray"]:
+        """Batched inference: evaluate ``N`` positions in one forward pass.
+
+        ``planes`` is ``(N, C, H, W)`` float32. Returns ``(policies, values)``
+        as numpy arrays of shape ``(N, policy_size)`` and ``(N,)``. This is the
+        path that keeps a GPU busy during self-play — one big batch instead of
+        ``N`` separate batch-1 calls.
+        """
+        self.eval()
+        device = next(self.parameters()).device
+        x = torch.from_numpy(planes).to(device, non_blocking=True)
+        logits, value = self.forward(x)
+        policies = F.softmax(logits, dim=1).cpu().numpy()
+        values = value.reshape(-1).cpu().numpy()
+        return policies, values

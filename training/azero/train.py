@@ -69,6 +69,12 @@ def run(config: Config, resume: bool = False) -> None:
     """Execute the full training loop."""
     device = resolve_device(config.device)
     logger.info("training on device: %s", device)
+    if device.startswith("cuda"):
+        # Let cuDNN pick the fastest convs for the fixed input shape and use
+        # TF32 matmuls — free throughput on Ampere/Hopper (e.g. H100).
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     run_dir = Path(config.run_dir)
     checkpoint_dir = Path(config.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
