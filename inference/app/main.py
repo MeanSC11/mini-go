@@ -16,6 +16,10 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="go-bot inference service")
 
+# The bot resigns once it is clearly lost, instead of playing on pointlessly in
+# a decided game. Gated on board fill so a noisy opening estimate never resigns.
+RESIGN_WIN_RATE = 0.10
+
 
 class MovePayload(BaseModel):
     """Wire format for a move (matches the game server)."""
@@ -81,15 +85,34 @@ async def levels() -> dict:
     return {"levels": available_levels()}
 
 
-@app.post("/move", response_model=MoveResponse)
-async def choose_move(request: PositionRequest) -> MoveResponse:
-    """Choose a move for the side to play in the given position."""
+def _should_resign(game: Game, side_to_move_rate: Optional[float]) -> bool:
+    """Whether the bot should resign rather than play a clearly lost game.
+
+    Requires a real win-rate estimate (the random bot has none) and that the
+    game is past the opening, so a noisy early estimate cannot trigger it.
+    """
+    if side_to_move_rate is None:
+        return False
+    past_opening = len(game.moves) >= 2 * game.board_size
+    return past_opening and side_to_move_rate < RESIGN_WIN_RATE
+
+
+def _evaluate(request: PositionRequest):
+    """Run the chosen bot on the position; return (game, move, rate, policy)."""
     game = replay(request)
     if game.is_over:
         raise HTTPException(status_code=422, detail="game is already over")
-    bot = get_bot(request.level)
-    move, rate, policy = bot.search(game)
-    if move.is_pass:
+    move, rate, policy = get_bot(request.level).search(game)
+    return game, move, rate, policy
+
+
+@app.post("/move", response_model=MoveResponse)
+async def choose_move(request: PositionRequest) -> MoveResponse:
+    """Choose a move for the side to play, resigning when clearly lost."""
+    game, move, rate, policy = _evaluate(request)
+    if _should_resign(game, rate):
+        payload = MovePayload(type="resign")
+    elif move.is_pass:
         payload = MovePayload(type="pass")
     else:
         assert move.point is not None
@@ -101,5 +124,13 @@ async def choose_move(request: PositionRequest) -> MoveResponse:
 
 @app.post("/analyze", response_model=MoveResponse)
 async def analyze(request: PositionRequest) -> MoveResponse:
-    """Analyze a position without committing to a move (same payload)."""
-    return await choose_move(request)
+    """Analyze a position (win rate + policy); never resigns."""
+    game, move, rate, policy = _evaluate(request)
+    if move.is_pass:
+        payload = MovePayload(type="pass")
+    else:
+        assert move.point is not None
+        payload = MovePayload(type="play", row=move.point[0], col=move.point[1])
+    return MoveResponse(
+        move=payload, win_rate=black_win_rate(game, rate), policy=policy
+    )

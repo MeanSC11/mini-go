@@ -2,13 +2,36 @@
 
 from fastapi.testclient import TestClient
 
-from app.main import app
+from goengine import Game, Move
+
+from app.main import _should_resign, app
 
 client = TestClient(app)
 
 
 def test_health() -> None:
     assert client.get("/health").json() == {"status": "ok"}
+
+
+def test_should_resign_only_when_lost_past_opening() -> None:
+    game = Game(9)
+    # Opening: never resign, even with a low estimate.
+    assert _should_resign(game, 0.01) is False
+    # Past the opening (>= 2*board_size moves) and clearly lost -> resign.
+    for _ in range(2 * game.board_size):
+        game.play(Move.pass_turn() if game.is_over else _first_legal(game))
+    assert _should_resign(game, 0.02) is True
+    assert _should_resign(game, 0.5) is False  # a playable game is not resigned
+    assert _should_resign(game, None) is False  # no estimate (random bot)
+
+
+def _first_legal(game: Game) -> Move:
+    for r in range(game.board_size):
+        for c in range(game.board_size):
+            move = Move.play(r, c)
+            if game.is_legal(move):
+                return move
+    return Move.pass_turn()
 
 
 def test_levels_include_random_and_mcts() -> None:

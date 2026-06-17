@@ -122,6 +122,13 @@ class UctBot:
                 node = node.parent  # type: ignore[assignment]
 
         best = max(root.children, key=lambda c: c.visits)
+        # Prefer passing when playing on does not improve the position: in a
+        # decided game every move scores the same, so the bot should stop
+        # filling instead of playing pointless stones.
+        pass_child = next((c for c in root.children if c.move and c.move.is_pass), None)
+        if pass_child is not None and pass_child.visits > 0 and best.visits > 0:
+            if pass_child.wins / pass_child.visits >= best.wins / best.visits:
+                best = pass_child
         win_rate = best.wins / best.visits if best.visits else 0.5
         total_visits = sum(c.visits for c in root.children)
         policy: Dict[str, float] = {}
