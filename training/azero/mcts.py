@@ -13,7 +13,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import torch
 
-from goengine import Game, Move
+from goengine import Game, Move, candidate_moves
 
 from azero.config import Config
 from azero.features import HistoryTracker, encode, index_to_move, move_to_index
@@ -149,7 +149,7 @@ class MCTS:
             game.board, tracker, game.current_player, self.config.history_planes
         )
         policy, value = self.net.predict(torch.from_numpy(planes))
-        legal = game.legal_moves()
+        legal = candidate_moves(game)  # exclude own-eye fills so finished games pass
         size = game.board_size
         priors = np.zeros(self.config.policy_size, dtype=np.float64)
         for move in legal:

@@ -10,34 +10,20 @@ import math
 import random
 from typing import Dict, List, Optional, Tuple
 
-from goengine import Color, Game, Move, Point
+from goengine import Color, Game, Move, Point, candidate_moves, is_eye_fill
 from goengine.scoring import area_score
 
 UCT_C = 1.4
 
 
 def is_simple_eye(game: Game, point: Point, color: Color) -> bool:
-    """Heuristic single-point eye check, used to keep playouts sane.
+    """Heuristic single-point eye check (shared engine helper).
 
     A point is treated as an eye if every neighbor is ``color`` and the
     diagonals are sufficiently controlled (all in the corner/edge case, at
     most one enemy diagonal in the interior).
     """
-    board = game.board
-    for n in board.neighbors(point):
-        if board.get(n) is not color:
-            return False
-    r, c = point
-    diagonals = [
-        (r + dr, c + dc)
-        for dr in (-1, 1)
-        for dc in (-1, 1)
-        if board.in_bounds((r + dr, c + dc))
-    ]
-    enemy = sum(1 for d in diagonals if board.get(d) is color.opponent)
-    if len(diagonals) < 4:  # edge or corner
-        return enemy == 0
-    return enemy <= 1
+    return is_eye_fill(game.board, point, color)
 
 
 def _random_playout_move(game: Game, rng: random.Random) -> Move:
@@ -82,7 +68,9 @@ class _Node:
         self.children: List[_Node] = []
         self.visits = 0
         self.wins = 0.0
-        self.untried: List[Move] = game.legal_moves() if not game.is_over else []
+        # Search over real moves only — exclude own-eye fills so the bot passes
+        # once the game is decided instead of filling its own territory.
+        self.untried: List[Move] = candidate_moves(game) if not game.is_over else []
 
     def ucb_child(self) -> "_Node":
         log_n = math.log(self.visits)

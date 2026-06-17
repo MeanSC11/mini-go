@@ -74,6 +74,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function createGame(options: {
   board_size: number;
+  komi?: number;
   mode: "hvh" | "hvb";
   bot_level?: string;
   user_id?: string;

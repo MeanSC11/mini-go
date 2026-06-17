@@ -20,6 +20,7 @@ function storeCredentials(gameId: string, color: string, token: string): void {
 export default function Lobby() {
   const router = useRouter();
   const [boardSize, setBoardSize] = useState(9);
+  const [komi, setKomi] = useState(6.5);
   const [mode, setMode] = useState<"hvh" | "hvb">("hvb");
   const [botLevel, setBotLevel] = useState("random");
   const [creatorColor, setCreatorColor] = useState<"black" | "white">("black");
@@ -45,6 +46,7 @@ export default function Lobby() {
     try {
       const creds = await createGame({
         board_size: boardSize,
+        komi,
         mode,
         bot_level: mode === "hvb" ? botLevel : undefined,
         creator_color: creatorColor,
@@ -80,6 +82,17 @@ export default function Lobby() {
             <option value={9}>9 × 9</option>
             <option value={13}>13 × 13</option>
             <option value={19}>19 × 19</option>
+          </select>
+        </div>
+        <div className="field">
+          <label>Komi</label>
+          <select value={komi} onChange={(e) => setKomi(Number(e.target.value))}>
+            <option value={0.5}>0.5</option>
+            <option value={2.5}>2.5</option>
+            <option value={4.5}>4.5</option>
+            <option value={5.5}>5.5</option>
+            <option value={6.5}>6.5</option>
+            <option value={7.5}>7.5</option>
           </select>
         </div>
         <div className="field">

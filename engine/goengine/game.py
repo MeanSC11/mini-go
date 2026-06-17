@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 from goengine.board import Board
-from goengine.scoring import area_score
+from goengine.scoring import score_position
 from goengine.types import Color, IllegalMoveError, Move, Point
 
 DEFAULT_KOMI = 7.5
@@ -158,11 +158,12 @@ class Game:
     def score(self) -> Tuple[float, float]:
         """Current Chinese area score as ``(black_points, white_points)``.
 
-        White's total includes komi. Can be called at any time, but is only
-        meaningful when all dead stones have been captured (as in self-play
-        games played to the end).
+        Dead stones (groups enclosed by the opponent that cannot live) are
+        removed before counting, so the score is meaningful at the end of a
+        played-out game even if the loser's dead groups were never lifted off
+        the board. White's total includes komi.
         """
-        black_area, white_area = area_score(self.board)
+        black_area, white_area = score_position(self.board)
         return float(black_area), float(white_area) + self.komi
 
     def _score_result(self) -> GameResult:

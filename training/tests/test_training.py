@@ -98,6 +98,24 @@ def test_selfplay_generates_consistent_samples(tiny_config: Config) -> None:
     assert all(abs(a + b) < 1e-9 for a, b in zip(zs, zs[1:]))
 
 
+def test_mcts_passes_when_only_own_eyes_remain(tiny_config: Config) -> None:
+    # Board fully controlled by black except its own eyes -> MCTS must pass,
+    # not fill its own territory (candidate moves exclude eye fills).
+    net = build_network(tiny_config, "cpu")
+    net.eval()
+    game = Game(5, komi=7.5)
+    for r in range(5):
+        for c in range(5):
+            if (r, c) not in {(1, 1), (3, 3)}:
+                game.board._set((r, c), Color.BLACK)
+    game._position_history = {game.board.position_hash}
+    game.current_player = Color.BLACK
+    tracker = HistoryTracker(tiny_config.history_planes, game.board)
+    mcts = MCTS(net, tiny_config)
+    move, _, _ = mcts.choose_move(game, tracker, temperature=0.0, add_noise=False)
+    assert move.is_pass
+
+
 def test_replay_buffer_roundtrip(tmp_path, tiny_config: Config) -> None:
     buffer = ReplayBuffer(capacity=100)
     rng = np.random.default_rng(0)

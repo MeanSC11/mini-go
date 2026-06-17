@@ -27,7 +27,7 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
-from goengine import Color, Game, Move
+from goengine import Color, Game, Move, candidate_moves
 
 from azero.config import Config
 from azero.features import HistoryTracker, encode, index_to_move, move_to_index
@@ -75,7 +75,7 @@ def _select_child(node: Node, c_puct: float) -> Tuple[int, Node]:
 
 
 def _expand_node(node: Node, game: Game, policy: np.ndarray, config: Config) -> None:
-    legal = game.legal_moves()
+    legal = candidate_moves(game)  # exclude own-eye fills so finished games pass
     size = game.board_size
     priors = np.zeros(config.policy_size, dtype=np.float64)
     for move in legal:

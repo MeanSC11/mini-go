@@ -1,4 +1,7 @@
-"""Chinese (area) scoring and end-of-game results."""
+"""Chinese (area) scoring and end-of-game results.
+
+Territory logic lives here; dead-stone removal is covered in test_dead_stones.py.
+"""
 
 from goengine import Color, Game, Move
 

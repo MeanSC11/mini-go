@@ -9,11 +9,13 @@ __pycache__/
 node_modules/
 .next/
 out/
+*.tsbuildinfo
 
 # Training artifacts
 runs/
 checkpoints/
 checkpoints-smoke/
+checkpoints-gpucheck/
 training/runs/
 training/checkpoints/
 training/checkpoints-smoke/
@@ -21,6 +23,9 @@ training/checkpoints-smoke/
 *.pt
 *.ckpt
 events.out.tfevents.*
+
+# One-off GPU verification config (throwaway)
+training/config.gpucheck.yaml
 
 # Misc
 .env

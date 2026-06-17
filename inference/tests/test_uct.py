@@ -35,6 +35,21 @@ def test_uct_wins_capturing_race() -> None:
     assert win_rate > 0.5
 
 
+def test_uct_passes_when_only_own_eyes_remain() -> None:
+    # Black owns the whole 5x5 board except two of its own eyes. The only sane
+    # move is to pass — the bot must not fill its own eyes to fill the board.
+    game = Game(5)
+    for r in range(5):
+        for c in range(5):
+            if (r, c) not in {(1, 1), (3, 3)}:
+                game.board._set((r, c), Color.BLACK)
+    game._position_history = {game.board.position_hash}
+    game.current_player = Color.BLACK
+    bot = UctBot(simulations=30, seed=1)
+    move, _, _ = bot.search(game)
+    assert move.is_pass
+
+
 def test_eye_detection() -> None:
     game = Game(9)
     # Black diamond around (1,1).

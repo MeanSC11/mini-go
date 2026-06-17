@@ -1,0 +1,65 @@
+# Tuned for a single-GPU laptop: RTX 5060 Laptop (Blackwell, 8 GB) + i7-14700HX.
+# A realistic "try it for real" 9x9 run. Start here, then scale up once the GPU
+# is confirmed busy (watch nvidia-smi) and loss is dropping.
+#
+# Prereq: a CUDA build of PyTorch (cu128+); the default venv has torch+cpu which
+# silently runs on CPU. See README / the chat for the install command.
+
+# Game
+board_size: 9
+komi: 7.5
+history_planes: 4
+
+# Network — measured: the GPU sits at <10% util during self-play, so a bigger
+# net is nearly free in wall-clock here and gives more strength per game.
+# 10x96 is a good sweet spot on the 5060; 6x64 is the lighter fallback.
+blocks: 10
+filters: 96
+
+# MCTS — 128 sims gives decent training targets without making self-play crawl.
+simulations: 128
+c_puct: 1.5
+dirichlet_alpha: 0.3
+dirichlet_eps: 0.25
+temperature_moves: 12
+
+# Self-play — one GPU: a single in-process generator that plays many games at
+# once and batches their leaf evals on the GPU (no multiprocess overhead, no
+# VRAM duplication). This is the "workers: 1" fast path in selfplay.py.
+# Measured best on this box: workers:1 + cuda + wide concurrency beats both the
+# multi-worker server path (IPC overhead cancels it) and CPU self-play (slower
+# forward). ~0.2 games/s; raising concurrency widened avg batch 12 -> 50.
+games_per_iteration: 96
+workers: 1
+selfplay_device: cuda
+selfplay_concurrent_games: 96     # games in flight; widens the GPU eval batch
+inference_max_batch: 256          # (only used by the multi-worker server path)
+inference_timeout_ms: 5.0
+precision: auto                   # -> bf16 on Blackwell (stable, no GradScaler)
+max_game_moves: 0
+
+# Replay buffer — start training after ~1 iteration.
+buffer_size: 120000
+min_buffer_size: 2000
+
+# Optimization — small net, so a large batch barely touches the 8 GB.
+batch_size: 512
+train_steps_per_iteration: 200
+learning_rate: 0.001
+weight_decay: 0.0001
+value_loss_weight: 1.0
+
+# Evaluation / promotion
+eval_games: 20
+promotion_win_rate: 0.55
+eval_simulations: 80
+
+# Loop / IO
+iterations: 100
+device: cuda
+run_dir: runs/9x9-5060
+checkpoint_dir: checkpoints
+
+# Stop conditions — circuit breaker so an overnight run doesn't go forever.
+max_hours: 8.0
+stop_on_plateau: true
